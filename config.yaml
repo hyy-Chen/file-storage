@@ -1,0 +1,9 @@
+server:
+  port: ":8080"
+
+routes:
+  upload_dir: "./folder"
+  upload_path: "/upload"
+  download_path: "/download"
+  file_move_path: "/move"
+  file_delete_path: "/delete"
