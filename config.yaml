@@ -7,3 +7,6 @@ routes:
   download_path: "/download"
   file_move_path: "/move"
   file_delete_path: "/delete"
+  create_folder_path: "/create_folder"
+  upload_folder_path: "/upload_folder"
+  test: "/test"
