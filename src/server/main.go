@@ -2,11 +2,14 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"file-storage/src/Tools"
 	"fmt"
 	"github.com/gin-gonic/gin"
+	"github.com/mholt/archiver/v3"
 	"github.com/spf13/viper"
 	"io"
+	"io/ioutil"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -21,6 +24,8 @@ var fileMovePath string
 var fileDeletePath string
 var createFolderPath string
 var uploadFolderPath string
+var downloadFolderPath string
+var queryFolderStructurePath string
 
 func init() {
 	// 读取配置文件
@@ -40,7 +45,8 @@ func init() {
 	fileDeletePath = routes["file_delete_path"].(string)
 	createFolderPath = routes["create_folder_path"].(string)
 	uploadFolderPath = routes["upload_folder_path"].(string)
-
+	downloadFolderPath = routes["download_folder_path"].(string)
+	queryFolderStructurePath = routes["query_folder_structure_path"].(string)
 	// 创建一个 gin 实例
 	r := gin.Default()
 
@@ -51,6 +57,8 @@ func init() {
 	r.POST(fileDeletePath, deleteFiles)
 	r.POST(createFolderPath, createFolder)
 	r.POST(uploadFolderPath, uploadFolder)
+	r.GET(downloadFolderPath, downloadFolder)
+	r.GET(queryFolderStructurePath, getFolderStructure)
 
 	// 启动 HTTP 服务器
 	go func() {
@@ -60,16 +68,18 @@ func init() {
 	}()
 }
 
-// 处理文件上传请求
+// 处理文件上传请求（改）
 func uploadHandler(c *gin.Context) {
-	file, err := c.FormFile("file_path")
+	file, err := c.FormFile("file")
+	dir := c.PostForm("upload_file_path")
 	if err != nil {
 		c.String(http.StatusBadRequest, fmt.Sprintf("get form err: %s", err.Error()))
 		return
 	}
 
 	// 保存文件到本地
-	filename := filepath.Join(uploadDir, file.Filename)
+	dir = filepath.Join(uploadDir, dir)
+	filename := filepath.Join(dir, file.Filename)
 	if err := c.SaveUploadedFile(file, filename); err != nil {
 		c.String(http.StatusInternalServerError, fmt.Sprintf("upload file err: %s", err.Error()))
 		return
@@ -80,8 +90,9 @@ func uploadHandler(c *gin.Context) {
 
 // 处理文件下载请求
 func downloadHandler(c *gin.Context) {
+	jsonStr := c.PostForm("json")
 	var req Tools.DownloadRequest
-	if err := c.BindJSON(&req); err != nil {
+	if err := json.Unmarshal([]byte(jsonStr), &req); err != nil {
 		c.String(http.StatusBadRequest, fmt.Sprintf("invalid request: %s", err.Error()))
 		return
 	}
@@ -103,9 +114,10 @@ func downloadHandler(c *gin.Context) {
 
 // 处理文件移动请求
 func moveFiles(c *gin.Context) {
+	jsonStr := c.PostForm("json")
 	// 解析请求参数
 	var req Tools.MoveFilesRequest
-	if err := c.BindJSON(&req); err != nil {
+	if err := json.Unmarshal([]byte(jsonStr), &req); err != nil {
 		c.String(http.StatusBadRequest, fmt.Sprintf("invalid request: %s", err.Error()))
 		return
 	}
@@ -138,9 +150,10 @@ func moveFiles(c *gin.Context) {
 
 // 处理删除文件/文件夹请求
 func deleteFiles(c *gin.Context) {
+	jsonStr := c.PostForm("json")
 	// 解析请求参数
 	var req Tools.DeleteFilesRequest
-	if err := c.BindJSON(&req); err != nil {
+	if err := json.Unmarshal([]byte(jsonStr), &req); err != nil {
 		c.String(http.StatusBadRequest, fmt.Sprintf("invalid request: %s", err.Error()))
 		return
 	}
@@ -166,9 +179,10 @@ func deleteFiles(c *gin.Context) {
 
 // 处理创建文件夹请求
 func createFolder(c *gin.Context) {
+	jsonStr := c.PostForm("json")
 	// 解析请求参数
 	var req Tools.CreateFolderRequest
-	if err := c.BindJSON(&req); err != nil {
+	if err := json.Unmarshal([]byte(jsonStr), &req); err != nil {
 		c.String(http.StatusBadRequest, fmt.Sprintf("invalid request: %s", err.Error()))
 		return
 	}
@@ -231,7 +245,7 @@ func uploadFolder(c *gin.Context) {
 		basePath := filepath.Join(dir, directory.Name)
 		// 先暂定不能覆盖原文件夹， 即出现相同文件夹名称就发出失败警告，并停止递归当前目录
 		path := filepath.Join(dirPath, basePath)
-		if directory.Type == Tools.Folder {
+		if directory.Type == Tools.DirectoryType {
 			if _, err := os.Stat(path); os.IsExist(err) {
 				errs = append(errs, fmt.Sprintf("directory %s is exist", basePath))
 				return
@@ -245,8 +259,8 @@ func uploadFolder(c *gin.Context) {
 			for _, child := range directory.Children {
 				save(basePath, &child)
 			}
-			// 如果是文件
-		} else {
+
+		} else { // 如果是文件
 			// 若找不到对应的文件信息，就停止操作并且存储报错信息
 			if fileHeader, ok := filesMap[directory.CName]; !ok {
 				errs = append(errs, fmt.Sprintf("Unable to find file information:%s", basePath))
@@ -280,6 +294,86 @@ func uploadFolder(c *gin.Context) {
 		// 返回成功响应
 		c.String(http.StatusOK, "folder upload successfully")
 	}
+}
+
+// 下载整个文件夹的方法
+func downloadFolder(c *gin.Context) {
+	folderPath := c.PostForm(Tools.DownloadFolderPath) // 获取文件夹路径参数
+	if folderPath == "" {
+		c.String(http.StatusBadRequest, "Missing folder path parameter")
+		return
+	}
+	folderPath = filepath.Join(uploadDir, folderPath)
+	if _, err := os.Stat(folderPath); os.IsNotExist(err) {
+		c.String(http.StatusBadRequest, "Missing folder path parameter")
+		return
+	}
+	target := filepath.Join("./tmp", filepath.Base(folderPath)+".zip")
+	// 创建压缩文件
+	err := archiver.Archive([]string{folderPath}, target)
+	if err != nil {
+		c.String(http.StatusAlreadyReported, fmt.Sprintf("files download fail\n%v", err))
+		return
+	}
+	defer os.Remove(target)
+	c.Writer.Header().Set("Content-Disposition", "attachment; filename="+filepath.Base(target))
+	c.File(target)
+}
+
+func getFolderStructure(c *gin.Context) {
+	folderPath := c.PostForm(Tools.QueryFolderStructurePath)
+	fmt.Println(folderPath)
+	folderPath = filepath.Join(uploadDir, folderPath)
+	fmt.Println(folderPath)
+	node, err := getFolderStructureJson(folderPath)
+	if err != nil {
+		c.String(http.StatusBadRequest, fmt.Sprintf("Failed to query folder structure, %s\n", err))
+	}
+	indent, err := json.MarshalIndent(node, "", "")
+	if err != nil {
+		c.String(http.StatusBadRequest, fmt.Sprintf("Failed to query folder structure, %s\n", err))
+	}
+	//将JSON字符串返回给前端
+	c.Data(http.StatusOK, "application/json", indent)
+}
+
+func getFolderStructureJson(dirPath string) (*Tools.Node, error) {
+	info, err := os.Stat(dirPath)
+	if err != nil {
+		return nil, err
+	}
+	//确认是否为目录
+	if !info.IsDir() {
+		return nil, errors.New("传入的不是目录")
+	}
+	//创建根节点Node
+	dirJSON := Tools.Node{
+		Name:     filepath.Base(dirPath),
+		Type:     1,
+		Children: []*Tools.FileNode{},
+	}
+
+	files, err := ioutil.ReadDir(dirPath)
+	if err != nil {
+		return nil, err
+	}
+	//遍历目录下的所有文件
+	for _, file := range files {
+		//如果是目录，递归调用本函数获取其Node，从顶层开始向下把Node加入当前节点的Children列表中
+		if file.IsDir() {
+			dirJSON.Children = append(dirJSON.Children, &Tools.FileNode{
+				Name: file.Name(),
+				Type: 1,
+			})
+		} else { //如果是普通文件，直接加入当前节点的Children列表中
+			dirJSON.Children = append(dirJSON.Children, &Tools.FileNode{
+				Name: file.Name(),
+				Type: 2,
+			})
+		}
+	}
+
+	return &dirJSON, nil
 }
 
 func main() {

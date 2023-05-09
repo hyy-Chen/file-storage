@@ -24,13 +24,27 @@ type Test struct {
 type Directory struct {
 	CName    string      `json:"cname"`
 	Name     string      `json:"name"`
-	Type     string      `json:"type"`
+	Type     int         `json:"type"`
 	Children []Directory `json:"children"`
+}
+
+type FileNode struct {
+	Name string `json:"name"`
+	Type int    `json:"type"`
+}
+
+type Node struct {
+	Name     string      `json:"name"`
+	Type     int         `json:"type"`
+	Children []*FileNode `json:"children"`
 }
 
 const (
 	UploadFolderFiles                = "files"
 	UploadFolderJson                 = "json"
-	Folder                           = "directory" // type
 	UploadFolderDestinationDirectory = "destination_directory"
+	DownloadFolderPath               = "folder_path"
+	QueryFolderStructurePath         = "folder_path"
+	DirectoryType                    = 1
+	FileType                         = 2
 )
